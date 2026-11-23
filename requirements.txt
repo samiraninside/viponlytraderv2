@@ -1,0 +1,14 @@
+pandas>=2.2.0
+numpy>=1.26.0
+pandas-ta>=0.3.14
+websocket-client>=1.8.0
+requests>=2.31.0
+pydantic>=2.5.0
+sqlalchemy>=2.0.23
+python-dotenv>=1.0.0
+schedule>=1.2.0
+python-dateutil>=2.9.0
+# production-only (uncomment when needed)
+# redis>=5.0.0
+# psycopg2-binary>=2.9.9
+# python-json-logger>=2.0.7
