@@ -6,13 +6,17 @@ import { testScanner } from "./custom/test";
 import { greeksToday } from "./greeks";
 import { authorised, login } from "./auth";
 import { type IST, isOpen, ist, mcxClose, NSE_HOLIDAYS, toMins, tradingDay, yearKnown } from "./calendar";
-import { HEDGE, PROFILES, RANKING, SCHEDULE, SCORE } from "./config";
+import { autoPause, calibration } from "./calibration";
+import { COMMERCIAL, HEDGE, PROFILES, RANKING, SCHEDULE, SCORE } from "./config";
+import { healthView, setManualKill } from "./health";
+import * as journal from "./journal";
+import { append, rows as ledgerRows, verify as verifyLedger, type LedgerKind } from "./ledger";
 import { Dhan } from "./dhan";
 import type { Card } from "./engine/opportunities";
 import type { Env } from "./env";
 import { refreshHistory } from "./history";
 import { hedgeScan } from "./hedge";
-import { pushOne } from "./push";
+import { type Alert, pushOne } from "./push";
 import { scan } from "./scan";
 import { buildUniverse, getKv, loadUniverse, putKv, rankLiquidity } from "./universe";
 
@@ -58,6 +62,7 @@ export async function tick(env: Env, t = ist()) {
       await hedgeScan(env, dhan, t).catch((e) => putKv(env, "hedges_error", `${t.hhmm} ${(e as Error).message}`));
     }
     if (nse) await once(env, t, "liquidity", SCHEDULE.liquidity, async () => { await dhan.init(); await rankLiquidity(env, dhan); });
+    if (nse) await once(env, t, "autopause", SCHEDULE.liquidity, () => autoPause(env, t.date));
   } finally {
     await unlock(env);
   }
@@ -81,15 +86,20 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     const top = live.filter((c) => { const n = (per.get(c.root) ?? 0) + 1; per.set(c.root, n); return n <= RANKING.maxPerUnderlying; });
     const open = all.filter((c) => c.status === "TRACKING" || (c.status === "ENTER" && c.horizon !== "intraday" && c.date < t.date));
     const done = all.filter((c) => c.status === "DONE" && c.date === t.date);
+    const lastRun = { nse: await getKv(env, "last_run:INDEX,STOCK"), mcx: await getKv(env, "last_run:COMMODITY") };
+    const px = (await getKv<Record<string, { px: number; at: string }>>(env, "lastpx")) ?? {};
+    const mine = (await journal.openEntries(env)).map((e) => ({ ...e, summary: journal.summary(e), progress: journal.progress(e, px[e.key]?.px ?? null) }));
     return json({
       now: `${t.date} ${t.hhmm}`, profile, profiles: PROFILES.map(({ id, label, capital, riskPerTrade }) => ({ id, label, capital, riskPerTrade })),
+      health: await healthView(env, t, lastRun, { nse: isOpen("NSE_FNO", t), mcx: isOpen("MCX_COMM", t) }),
+      journal: mine, disclosure: COMMERCIAL.registration ? `${COMMERCIAL.disclosure} Reg. no. ${COMMERCIAL.registration}.` : COMMERCIAL.disclosure,
       market: {
         nse: isOpen("NSE_FNO", t) ? "open" : NSE_HOLIDAYS[t.date] ?? "closed",
         mcx: isOpen("MCX_COMM", t) ? `open till ${Math.floor(mcxClose(t.date) / 60)}:${String(mcxClose(t.date) % 60).padStart(2, "0")}` : "closed",
         calendarKnown: yearKnown(t.date),
       },
       top: top.slice(0, SCORE.topN), open, done, hedges: await getKv(env, "hedges"), hedgesError: await getKv(env, "hedges_error"),
-      lastRun: { nse: await getKv(env, "last_run:INDEX,STOCK"), mcx: await getKv(env, "last_run:COMMODITY") },
+      lastRun,
     });
   }
   if (p === "/api/perf") {
@@ -117,6 +127,13 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     const test = await getKv<number>(env, "test_push");
     const r = await env.DB.prepare("SELECT json FROM cards WHERE date=? AND status='ENTER' ORDER BY updated DESC, score DESC LIMIT 1").bind(t.date).first<{ json: string }>();
     if (test && Date.now() - test < 120e3) { await putKv(env, "test_push", 0); return json({ title: "VIPONLYTRADER", body: "Test notification: alerts are working." }); }
+    const alerts = (await getKv<Alert[]>(env, "alerts")) ?? [];
+    const fresh = alerts.filter((a) => Date.now() - (a.at ?? 0) < 180e3 && !(a as any).shown);
+    if (fresh.length) {
+      const a = fresh.at(-1)!; (a as any).shown = true;
+      await putKv(env, "alerts", alerts);
+      return json({ title: a.title, body: a.body, tag: a.tag });
+    }
     if (!r) return json({ title: "VIPONLYTRADER", body: "New opportunities are on the board." });
     const c = JSON.parse(r.json) as Card;
     return json({ title: `${c.status} · ${c.root} · score ${c.score}`, body: `${c.label}\n${c.trigger}`, tag: c.id });
@@ -155,10 +172,12 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
       created: d.created ?? Date.now(),
     };
     await env.DB.prepare("INSERT OR REPLACE INTO scanners(id,json,created) VALUES(?,?,?)").bind(def.id, JSON.stringify(def), def.created).run();
+    await append(env, [{ kind: "CONFIG", ref: `scanner:${def.id}`, data: { change: d.id ? "scanner saved" : "scanner created", scanner: def } }]);
     return json({ ok: true, scanner: def });
   }
   if (p === "/api/scanners" && req.method === "DELETE") {
     await env.DB.prepare("DELETE FROM scanners WHERE id=?").bind(url.searchParams.get("id")).run();
+    await append(env, [{ kind: "CONFIG", ref: `scanner:${url.searchParams.get("id")}`, data: { change: "scanner deleted" } }]);
     return json({ ok: true });
   }
   if (p === "/api/scanners/parse" && req.method === "POST") {
@@ -177,6 +196,8 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     const o = (await getKv<Record<string, boolean>>(env, "agent_overrides")) ?? {};
     o[name] = !!enabled;
     await putKv(env, "agent_overrides", o);
+    if (enabled) { const ap = (await getKv<Record<string, unknown>>(env, "autopaused")) ?? {}; delete ap[name]; await putKv(env, "autopaused", ap); }
+    await append(env, [{ kind: "CONFIG", ref: `agent:${name}`, data: { change: enabled ? "agent on" : "agent off", agent: name, by: "you" } }]);
     return json({ ok: true, overrides: o });
   }
   if (p === "/api/settings") {
@@ -204,6 +225,62 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
       steps.push({ step: "positions (read-only)", ok: true, detail: `${pos.length} positions` });
     } catch (e) { steps.push({ step: "positions (read-only)", ok: false, detail: (e as Error).message }); }
     return json({ steps });
+  }
+  // ---------------------------------------------------------------- kill switch
+  if (p === "/api/kill" && req.method === "POST") {
+    const { on, reason } = (await req.json()) as { on: boolean; reason?: string };
+    return json(await setManualKill(env, !!on, String(reason ?? "").slice(0, 200), `${t.date} ${t.hhmm}`));
+  }
+  // ---------------------------------------------------------------- ledger
+  if (p === "/api/ledger") {
+    const kind = url.searchParams.get("kind") as LedgerKind | null;
+    return json(await ledgerRows(env, { kind: kind ?? undefined, limit: Math.min(2000, +(url.searchParams.get("limit") ?? 200)) }));
+  }
+  if (p === "/api/ledger/verify") return json(await verifyLedger(env));
+  if (p === "/api/ledger/export") {
+    const all = (await ledgerRows(env, { limit: 1_000_000 })).reverse().map(({ data, ...r }) => r);
+    return new Response(JSON.stringify({ exportedAt: `${t.date} ${t.hhmm} IST`, check: await verifyLedger(env), rows: all }), {
+      headers: { "Content-Type": "application/json", "Content-Disposition": `attachment; filename="viponly-ledger-${t.date}.json"` },
+    });
+  }
+  if (p === "/api/calibration") return json(await calibration(env, url.searchParams.get("profile") ?? "basic", +(url.searchParams.get("days") ?? 30)));
+  // ---------------------------------------------------------------- journal (your real trades)
+  if (p === "/api/journal" && req.method === "GET") {
+    const list = await journal.list(env, +(url.searchParams.get("days") ?? 30));
+    const px = (await getKv<Record<string, { px: number; at: string }>>(env, "lastpx")) ?? {};
+    return json({ stats: journal.stats(list), entries: list.map((e) => ({ ...e, summary: journal.summary(e), progress: journal.progress(e, px[e.key]?.px ?? null) })) });
+  }
+  if (p === "/api/journal" && req.method === "POST") {
+    const b = (await req.json()) as { cardId: string; lots: number; price: number; note?: string };
+    const r = await env.DB.prepare("SELECT json FROM cards WHERE id=?").bind(b.cardId).first<{ json: string }>();
+    if (!r) return json({ error: "signal not found" }, 404);
+    if (!(b.lots >= 1) || !(b.price > 0)) return json({ error: "lots ≥ 1 and a fill price are required" }, 400);
+    const c = JSON.parse(r.json) as Card;
+    const px = (await getKv<Record<string, { px: number }>>(env, "lastpx")) ?? {};
+    const e = journal.fromCard(c, Math.floor(b.lots), +b.price, Date.now(), px[c.key]?.px ?? null, b.note?.slice(0, 500));
+    await journal.save(env, e, "opened");
+    return json({ ok: true, entry: e, summary: journal.summary(e) });
+  }
+  if (p === "/api/journal/fill" && req.method === "POST") {
+    const b = (await req.json()) as { id: string; side: "in" | "out"; lots: number; price: number; note?: string };
+    const e = await journal.load(env, b.id);
+    if (!e || e.status !== "OPEN") return json({ error: "no open trade with that id" }, 404);
+    if (!(b.lots >= 1) || !(b.price > 0) || !["in", "out"].includes(b.side)) return json({ error: "side in|out, lots ≥ 1 and a price are required" }, 400);
+    const open = journal.summary(e).openLots;
+    if (b.side === "out" && b.lots > open) return json({ error: `only ${open} lots are open` }, 400);
+    e.fills.push({ side: b.side, lots: Math.floor(b.lots), price: +b.price, at: Date.now(), note: b.note?.slice(0, 200) });
+    if (journal.summary(e).openLots === 0) e.status = "CLOSED";
+    await journal.save(env, e, b.side === "in" ? "added" : e.status === "CLOSED" ? "closed" : "partial exit");
+    return json({ ok: true, entry: e, summary: journal.summary(e) });
+  }
+  if (p === "/api/journal/void" && req.method === "POST") {
+    const b = (await req.json()) as { id: string; reason: string };
+    const e = await journal.load(env, b.id);
+    if (!e) return json({ error: "not found" }, 404);
+    if (!b.reason?.trim()) return json({ error: "a reason is required" }, 400);
+    e.status = "VOID"; e.voidReason = b.reason.slice(0, 200);
+    await journal.save(env, e, "voided");
+    return json({ ok: true });
   }
   if (p === "/api/status") {
     const jobs: Record<string, unknown> = {};

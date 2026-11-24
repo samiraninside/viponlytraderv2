@@ -54,8 +54,12 @@ function card(c) {
       <span>Win <b>${Math.round(c.pWin * 100)}%</b> of ${c.n}${c.thin ? " · thin evidence" : ""}</span></div>
     ${c.structure === "short_strangle" ? `<div class="warn">Gap risk: a ${c.gapMovePct}% gap (the largest of the last year, or a stress minimum) would cost about ${inr(c.gapLoss)}. Naked selling has no cap.</div>` : ""}
     ${c.worstCase && c.worstCase > c.maxLoss * 1.2 ? `<div class="meta">Worst case if the stop is not honoured: ${inr(c.worstCase)}</div>` : ""}
+    ${c.overCap ? `<div class="warn">One lot loses ${inr(c.perLot?.risk)} at the stop, more than this profile's ${inr(profileRisk())} per trade. Shown for information; skip it or use a bigger profile.</div>` : ""}
+    ${c.blocked ? `<div class="warn">Held back: ${c.blocked}</div>` : ""}
+    ${c.chase ? `<div class="warn" style="color:#c9b6ff">Don't chase: price is already ${c.chase.movedR}R past entry. Wait for a retracement towards ${num(c.chase.retestAt)} (future).</div>` : ""}
     ${out}
     ${avgPlan(c)}
+    ${["ENTER", "WAIT", "TRACKING"].includes(c.status) ? takeForm(c) : ""}
     <details><summary>Why</summary><ul>${c.why.map((w) => `<li>${w}</li>`).join("")}${c.confirm ? c.confirm.votes.map((v) => `<li>${v.v > 0 ? "✓" : v.v < 0 ? "✗" : "·"} ${v.label}</li>`).join("") : ""}<li>Setup: ${c.setup}</li></ul></details>
   </article>`;
 }
@@ -70,6 +74,41 @@ function avgPlan(c) {
     ${a.skipped ? `<li class="neg">Skipped: ${a.skipped}.</li>` : ""}<li>Stop stays at ${c.levels.sl}. Adds are paid from the ${inr(a.reserve)} reserve.</li></ul></details>`;
 }
 
+const profileRisk = () => state.data?.profiles.find((p) => p.id === state.profile)?.riskPerTrade;
+function tag(c) {
+  if (c.overCap) return ["OVER", "1 lot > cap"];
+  if (c.blocked) return ["HELD", "Held"];
+  if (c.chase) return ["CHASE", "Don't chase"];
+  return [c.status, c.status === "WAIT" ? "Wait" : c.status === "ENTER" ? "Enter" : c.status];
+}
+function row(c) {
+  const [cls, label] = tag(c), m = c.perLot ?? {};
+  return `<details class="opp ${c.status} ${c.overCap ? "over" : ""}"><summary>
+    <span class="badge ${cls}">${label}</span>
+    <span class="r-sym"><b>${c.root}</b><small>${STRUCT[c.structure]} · ${HZ[c.horizon]} · ${(c.agents?.length ? c.agents : [c.agent]).map(agentName).join(" + ")}</small></span>
+    <span class="r-money"><span>1 lot<b>${inr(m.capital)}</b></span><span class="risk">risk<b>${inr(m.risk)}</b></span><span class="rew">reward<b>${inr(m.reward)}</b></span></span>
+    <span class="r-score" style="color:${scoreColor(c.score)}">${c.score}</span></summary>${card(c)}</details>`;
+}
+function takeForm(c) {
+  return `<div class="take" data-card="${c.id}"><label>Lots<input type="number" min="1" value="1" class="tLots"></label>
+    <label>Your fill (${c.levels.basis === "underlying" ? "price" : c.levels.basis === "credit" ? "credit" : "premium"})<input type="number" step="0.05" value="${c.levels.entry}" class="tPx"></label>
+    <label style="flex:1">Note<input type="text" class="tNote" placeholder="optional" style="width:100%"></label>
+    <button data-take="${c.id}">I took this trade</button></div>`;
+}
+function banner(d) {
+  const h = d.health ?? {}, out = [];
+  if (h.manual?.on) out.push(`<div class="banner bad">⛔ Kill switch ON since ${h.manual.at}: ${h.manual.reason}. No new ENTER is shown or pushed. <button data-kill="0">Turn off</button></div>`);
+  for (const seg of ["NSE", "MCX"]) {
+    const x = h[seg];
+    if (!x) continue;
+    if (!x.ok) out.push(`<div class="banner bad">⚠ ${seg} data check failed since ${x.since}: ${x.reasons.join("; ")}. New ENTERs are held until data is healthy.</div>`);
+    else if (x.scanLate && x.minutesSinceScan != null) out.push(`<div class="banner warn">⚠ ${seg}: no scan for ${x.minutesSinceScan} minutes. The board may be stale.</div>`);
+  }
+  const alerts = (d.journal ?? []).filter((e) => e.watch && !["OK"].includes(e.watch.level));
+  for (const e of alerts) out.push(`<div class="banner ${["EXIT", "STOP"].includes(e.watch.level) ? "bad" : "warn"}"><span class="lvl ${e.watch.level}">${e.watch.level}</span> Your ${e.root} trade: ${e.watch.reasons.join("; ")}</div>`);
+  $("#banner").innerHTML = out.join("");
+}
+
 const SELL = ["iron_fly", "iron_condor", "short_strangle", "credit_spread"];
 const match = (c) => state.filter === "all" || (state.filter === "sell" ? SELL.includes(c.structure) : state.filter === "watch" ? c.status === "WAIT" : c.horizon === state.filter);
 
@@ -80,7 +119,9 @@ function render() {
   $("#profiles").innerHTML = d.profiles.map((p) => `<button data-p="${p.id}" class="${p.id === state.profile ? "on" : ""}">${p.label}<br><small style="opacity:.7">risk ${inr(p.riskPerTrade)}/trade</small></button>`).join("");
   const lr = d.lastRun.nse || d.lastRun.mcx;
   $("#status").textContent = `Updated ${d.now} IST${lr ? ` · last scan ${lr.at}, ${lr.instruments} instruments, ${lr.candidates} signals` : ""}${d.market.calendarKnown ? "" : " · holiday calendar for this year not loaded"}`;
-  const pages = ["perf", "hedge", "greeks", "scanners", "settings"], page = pages.includes(state.filter);
+  banner(d);
+  if (d.disclosure) $("#disclosure").textContent = d.disclosure;
+  const pages = ["perf", "hedge", "greeks", "scanners", "settings", "mine"], page = pages.includes(state.filter);
   for (const p of pages) $("#" + p).hidden = state.filter !== p;
   for (const id of ["#top", "#open", "#done", "#openH", "#doneH"]) $(id).hidden = page;
   if (state.filter === "perf") return renderPerf();
@@ -88,8 +129,9 @@ function render() {
   if (state.filter === "greeks") return renderGreeks();
   if (state.filter === "scanners") return renderScanners();
   if (state.filter === "settings") return renderSettings();
+  if (state.filter === "mine") return renderMine();
   const top = d.top.filter(match);
-  $("#top").innerHTML = top.length ? top.map(card).join("") : `<div class="empty">No opportunity with a positive edge right now for this profile. That is a normal answer; the board refreshes every 5 minutes in market hours.</div>`;
+  $("#top").innerHTML = top.length ? top.map(row).join("") : `<div class="empty">No opportunity with a positive edge right now for this profile. That is a normal answer; the board refreshes every 5 minutes in market hours.</div>`;
   const open = d.open.filter(match);
   $("#openH").hidden = !open.length;
   $("#open").innerHTML = open.map(card).join("");
@@ -227,6 +269,8 @@ async function renderSettings() {
     ${s.dhan.lastTokenError ? `<div class="err">Last error: ${s.dhan.lastTokenError}</div>` : ""}
     <div class="row2" style="margin-top:10px"><button id="dTest">Test Dhan connection</button></div><div id="dOut"></div>
     <p class="status">These are secrets, set in Cloudflare (not in this page): dash.cloudflare.com → Workers & Pages → viponly-scanner → Settings → Variables and Secrets → Add → type <b>Secret</b>. The values are never shown again, not even here.</p></div>
+    <h2>Kill switch</h2><div class="hbox"><p class="status">Stops every new ENTER (board and push) until you switch it back. Calls already published keep being tracked. Every switch is logged in the ledger.</p>
+    ${state.data?.health?.manual?.on ? `<div class="err">ON since ${state.data.health.manual.at}: ${state.data.health.manual.reason}</div><button data-kill="0">Turn off</button>` : `<button data-kill="1" style="background:var(--red);color:#fff">Stop new signals</button>`}</div>
     <h2>App</h2><div class="hbox">
     <div class="toggle"><span>Login</span><span>${s.login}</span></div>
     <div class="toggle"><span>Push keys (VAPID)</span>${tick(s.push.vapid)}</div>
@@ -247,13 +291,85 @@ async function renderSettings() {
   };
 }
 
-async function renderPerf() {
-  const p = await get("/api/perf");
-  const tbl = (rows, cols) => `<table><tr>${cols.map((c) => `<th>${c[0]}</th>`).join("")}</tr>${rows.map((r) => `<tr>${cols.map((c) => `<td>${c[1](r)}</td>`).join("")}</tr>`).join("")}</table>`;
-  $("#perf").innerHTML = `<h2>Live track record since ${p.since}</h2><p class="status">Every card that reached ENTER, followed to its outcome on the underlying, in R (1R = the distance to the stop). Hypothetical: assumes entry at the card's levels.</p>
-    ${tbl(p.byScore, [["Score", (r) => r.band], ["Trades", (r) => r.n], ["Win %", (r) => Math.round((r.wins / r.n) * 100) + "%"], ["Avg R", (r) => r.avgR]])}
-    <h2>By agent</h2>${tbl(p.byAgent, [["Agent", (r) => AGENT[r.agent] ?? r.agent], ["Horizon", (r) => HZ[r.horizon] ?? r.horizon], ["Trades", (r) => r.n], ["Win %", (r) => Math.round((r.wins / r.n) * 100) + "%"], ["Avg R", (r) => r.avgR], ["Avg score", (r) => r.avgScore]])}`;
+function progressBar(p) {
+  if (!p) return "";
+  const lo = Math.min(p.slPct, -100), hi = Math.max(110, p.pct), span = hi - lo, x = (v) => ((v - lo) / span) * 100;
+  const a = x(Math.min(0, p.pct)), b = x(Math.max(0, p.pct));
+  return `<div class="bar"><i class="fill ${p.pct >= 0 ? "pos" : "neg"}" style="left:${a}%;width:${b - a}%"></i>
+    <i class="mk sl" style="left:${x(p.slPct)}%" title="stop"></i><i class="mk zero" style="left:${x(0)}%" title="your entry"></i>
+    <i class="mk t1" style="left:${x(p.t1Pct)}%" title="T1"></i><i class="mk" style="left:${x(100)}%" title="T2"></i></div>
+    <div class="meta"><span>Future ${num(p.px)}</span><span>${p.pct}% of the way to T2 from your entry</span><span style="color:var(--red)">stop</span><span style="color:var(--amber)">T1</span></div>`;
 }
+function tradeBox(e) {
+  const s = e.summary, w = e.watch;
+  const open = e.status === "OPEN";
+  return `<div class="hbox"><div class="row2"><b>${e.root}</b><span>${e.label}</span><span class="status">${HZ[e.horizon]} · signal score ${e.signal.score} · ${new Date(e.created).toLocaleString("en-IN")}</span>
+      ${w ? `<span class="lvl ${w.level}">${w.level}</span>` : ""}<span class="status" style="margin-left:auto">${e.status}${e.voidReason ? ": " + e.voidReason : ""}</span></div>
+    <div class="meta"><span>Signal entry <b>${num(e.signal.entry)}</b> · SL <b>${num(e.signal.sl)}</b> · T1 <b>${num(e.signal.t1)}</b> · T2 <b>${num(e.signal.t2)}</b></span></div>
+    <div class="meta"><span>Your avg in <b>${num(s.avgIn)}</b></span>${s.avgOut ? `<span>avg out <b>${num(s.avgOut)}</b></span>` : ""}<span>open lots <b>${s.openLots}</b></span>
+      ${s.slippage ? `<span>slippage <b class="${s.slippage.rupees > 0 ? "neg" : "pos"}">${inr(s.slippage.rupees)}</b>${s.slippage.pctOfRisk != null ? ` (${s.slippage.pctOfRisk}% of risk)` : ""}</span>` : ""}
+      <span>realised <b class="${s.realised >= 0 ? "pos" : "neg"}">${inr(s.realised)}</b>${s.r != null ? ` (${s.r}R)` : ""}</span></div>
+    ${open ? progressBar(e.progress) : ""}
+    ${w && w.reasons.length ? `<div class="meta">${w.reasons.join(" · ")}</div>` : ""}
+    <div class="meta">${e.fills.map((f) => `${f.side === "in" ? "+" : "−"}${f.lots} @ ${num(f.price)}`).join(" · ")}</div>
+    ${open ? `<div class="take" data-entry="${e.id}"><label>Lots<input type="number" min="1" value="${s.openLots}" class="fLots"></label><label>Price<input type="number" step="0.05" class="fPx"></label>
+      <button data-fill="out">Exit</button><button data-fill="in">Add</button><button data-void="${e.id}">Void (mistake)</button></div>` : ""}
+    <div class="status">${s.note}</div></div>`;
+}
+async function renderMine() {
+  const j = await get("/api/journal?days=60"), st = j.stats;
+  const open = j.entries.filter((e) => e.status === "OPEN"), closed = j.entries.filter((e) => e.status !== "OPEN");
+  $("#mine").innerHTML = `<h2>Your real trades · last 60 days</h2>
+    <div class="hbox meta"><span>Closed <b>${st.trades}</b></span><span>Open <b>${st.open}</b></span><span>Win <b>${st.winPct ?? "–"}${st.winPct != null ? "%" : ""}</b></span>
+      <span>P&L <b class="${st.pnl >= 0 ? "pos" : "neg"}">${inr(st.pnl)}</b> (gross)</span><span>Avg <b>${st.avgR ?? "–"}R</b></span>
+      <span>Avg slippage <b>${st.avgSlippagePctOfRisk ?? "–"}${st.avgSlippagePctOfRisk != null ? "% of risk" : ""}</b></span><span>Lost more than planned <b class="${st.lostMoreThanPlanned ? "neg" : ""}">${st.lostMoreThanPlanned}</b></span></div>
+    <h2>Open</h2>${open.length ? open.map(tradeBox).join("") : `<div class="status">None. Tap a board row, then "I took this trade".</div>`}
+    <h2>Closed</h2>${closed.length ? closed.map(tradeBox).join("") : `<div class="status">None yet.</div>`}`;
+}
+
+async function renderPerf() {
+  const [p, cal, v, j] = await Promise.all([get("/api/perf"), get(`/api/calibration?profile=${state.profile}`), get("/api/ledger/verify"), get("/api/journal?days=30")]);
+  const tbl = (rows, cols) => `<table><tr>${cols.map((c) => `<th>${c[0]}</th>`).join("")}</tr>${rows.map((r) => `<tr>${cols.map((c) => `<td>${c[1](r)}</td>`).join("")}</tr>`).join("")}</table>`;
+  const pc = (x) => (x == null ? "–" : x + "%");
+  const calCols = [["Trades", (r) => r.n], ["Predicted win", (r) => pc(r.predictedWinPct)], ["Live win", (r) => pc(r.winPct)], ["Predicted EV", (r) => (r.predictedEvR ?? "–") + "R"], ["Live avg", (r) => `<b class="${(r.avgR ?? 0) >= 0 ? "pos" : "neg"}">${r.avgR ?? "–"}R</b>`]];
+  $("#perf").innerHTML = `<h2>Ledger</h2><div class="hbox">${v.ok ? `<b class="ok">✓ Chain intact</b>: ${v.rows} records, nothing edited or deleted.` : `<b class="err">✗ Chain broken at record ${v.brokenAt}: ${v.reason}</b>`}
+      <div class="status">Head hash ${v.head.slice(0, 16)}… · <a href="/api/ledger/export" style="color:var(--blue)">Download the full ledger (JSON)</a></div></div>
+    <h2>Calibration · ${state.profile} · last ${cal.days} days</h2><p class="status">${cal.calls} calls published, ${cal.closed} closed, ${cal.open} open. ${cal.note}</p>
+    ${cal.overall.n ? tbl([{ band: "All", ...cal.overall }, ...cal.byScore.filter((r) => r.n)], [["Score", (r) => r.band], ...calCols]) : `<div class="status">No closed calls yet.</div>`}
+    ${cal.byAgent.length ? tbl(cal.byAgent, [["Agent", (r) => (AGENT[r.agent] ?? r.agent) + (r.paused ? ` <span class="chip no">paused: ${r.paused.reason}</span>` : "")], ...calCols]) : ""}
+    ${cal.chased.n && cal.notChased.n ? `<p class="status">Calls flagged "don't chase": ${cal.chased.n} trades, live avg ${cal.chased.avgR}R vs ${cal.notChased.avgR}R for the rest.</p>` : ""}
+    <h2>Your real trades vs the signals (30 days)</h2><div class="hbox meta"><span>Closed <b>${j.stats.trades}</b></span><span>Win <b>${pc(j.stats.winPct)}</b></span><span>Avg <b>${j.stats.avgR ?? "–"}R</b></span><span>Slippage <b>${j.stats.avgSlippagePctOfRisk ?? "–"}${j.stats.avgSlippagePctOfRisk != null ? "% of risk" : ""}</b></span></div>
+    <h2>Every ENTER, all profiles (hypothetical)</h2>
+    ${tbl(p.byScore, [["Score", (r) => r.band], ["Trades", (r) => r.n], ["Win %", (r) => Math.round((r.wins / r.n) * 100) + "%"], ["Avg R", (r) => r.avgR]])}`;
+}
+
+async function post(path, body) { return (await fetch(path, { method: "POST", credentials: "include", body: JSON.stringify(body) })).json(); }
+document.addEventListener("click", async (ev) => {
+  const t = ev.target.closest("[data-take],[data-fill],[data-void],[data-kill]");
+  if (!t) return;
+  if (t.dataset.take) {
+    const box = t.closest(".take");
+    const r = await post("/api/journal", { cardId: t.dataset.take, lots: +box.querySelector(".tLots").value, price: +box.querySelector(".tPx").value, note: box.querySelector(".tNote").value });
+    if (r.error) return alert(r.error);
+    alert(`Journaled: ${r.entry.root}, ${r.entry.fills[0].lots} lot(s) at ${r.entry.fills[0].price}. Slippage vs signal: ${inr(r.summary.slippage.rupees)}. You'll get exit alerts on this trade.`);
+    load();
+  } else if (t.dataset.fill) {
+    const box = t.closest(".take"), price = +box.querySelector(".fPx").value;
+    if (!price) return alert("Enter the price you got.");
+    const r = await post("/api/journal/fill", { id: box.dataset.entry, side: t.dataset.fill, lots: +box.querySelector(".fLots").value, price });
+    if (r.error) return alert(r.error);
+    renderMine(); load();
+  } else if (t.dataset.void) {
+    const reason = prompt("Why void this entry? (it stays in the ledger, marked void)");
+    if (!reason) return;
+    await post("/api/journal/void", { id: t.dataset.void, reason }); renderMine();
+  } else if (t.dataset.kill !== undefined) {
+    const on = t.dataset.kill === "1";
+    const reason = on ? prompt("Why are you switching new signals off?") ?? "" : "";
+    if (on && !reason) return;
+    await post("/api/kill", { on, reason }); load(); if (state.filter === "settings") renderSettings();
+  }
+});
 
 async function load() {
   try { state.data = await get(`/api/cards?profile=${state.profile}`); render(); } catch (e) { if (e.message !== "login") $("#status").textContent = "Could not load: " + e.message; }

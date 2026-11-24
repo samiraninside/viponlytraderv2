@@ -7,7 +7,7 @@ tablet, with push alerts. **It never places orders.** You trade in the Dhan app 
 
 ## What you get on the tablet
 
-- **Top 10 cards per profile**. Each card shows:
+- **Top 10 opportunities per profile, as a list.** Each row shows status (Enter / Wait / Don't chase / Held), the instrument, structure and agents, the score, and **one lot in rupees: capital, risk at the stop, reward at T2**. A row is **red** when one lot loses more than the profile's risk per trade; red rows are never pushed. Tap a row for the full card, which shows:
   - **Status:** ENTER (act now) or WAIT (with the exact trigger).
   - **What to trade:** future, option buy, debit spread, future plus protective option, straddle, iron fly or condor, or short strangle (Big profile only).
   - **Levels:** entry, SL, T1, T2 (and T3 for 2–3 day ideas) as premium or future price, plus the matching levels on the future.
@@ -22,7 +22,20 @@ tablet, with push alerts. **It never places orders.** You trade in the Dhan app 
 - **Scanners tab:** write your own scanner in Chartink-style rules (your Scanner A text works as pasted), **Check rules**, **Test on the market** (today's passes and each instrument's history, in R), then **Save**. It runs every 5 minutes like the built-in agents. Built-in agents can be switched on and off on the same page.
 - **Greeks tab:** every 15 minutes for each index and crude, the call vega vs put vega of the nearest expiry, weighted by open interest. It shows the difference and how it has changed today, plus the ATM call and put IV, theta, and a chart of put − call vega through the day. Custom scanners can use `[0] chain Vega Diff`, `Call Vega`, `Put Vega`, `IV Rank` and `PCR`.
 - **Hero-Zero (expiry day):** after 13:30 on an index's expiry day, if the index is coiled (narrow range), it suggests cheap OTM options (₹4–25 on NIFTY) or an OTM strangle. Max loss is the premium. It is scored on history like everything else, so expect few cards.
-- **⚙ Settings:** Dhan status and connection test, login mode, push keys.
+- **My trades:** tap "I took this trade" on any card, enter your lots and fill. The journal tracks:
+  - slippage against the signal;
+  - adds and partial exits;
+  - P&L in ₹ and R;
+  - a progress bar from your entry towards T2, with the stop and T1 marked.
+
+  Every 5 minutes each open trade is watched:
+  - **STOP / T1 / T2:** the level was reached; pushed once each.
+  - **EXIT:** two or more reversal signals (VWAP or EMA20 lost, an opposite signal, the option chain flipping, OI unwinding).
+  - **CAUTION:** one reversal signal.
+- **Don't chase:** when price has already run more than 0.5R past an ENTER's entry, the row says so and gives the retracement level. These are not pushed.
+- **Kill switch and data check:** no new ENTER is shown or pushed while Dhan data is stale or missing, or while you have the switch on (Settings). A banner says why. Calls already published keep being tracked.
+- **Signal ledger (Track record tab):** every published call, its outcome, your journaled trades and every switch you flip are written to an append-only, hash-chained ledger. The tab shows whether the chain is intact and lets you download it. It also shows **calibration**: predicted win % and EV against live results, by score band and by agent. An agent with a live average below −0.1R over 20+ trades in 30 days is **paused automatically**; switch it back on in Scanners. Both the pause and your switch are logged.
+- **⚙ Settings:** Dhan status and connection test, login mode, push keys, kill switch.
 - **Push alerts:** when a card turns ENTER with a score of 75 or more for your profile. Quiet from 23:59 to 07:30.
 
 ## The schedule (IST, automatic)
@@ -102,6 +115,8 @@ From then on, every push to GitHub redeploys automatically.
 
 ## First week checklist
 
+- After pulling this version into an existing database, run `npm run db:init` again: it only adds the new tables (`ledger`, `journal`, `users`, `subscriptions`).
+- Track record tab: "Chain intact" in green.
 - `/api/status`: the `token`, `universe` and `history` jobs show today's date and `error: null`, and the universe lists your instruments.
 - The status line under the filters shows the last scan time and how many instruments it covered.
 - Compare one card's premium, lot size and margin with the Dhan app. Margins are estimates (`MARGIN` in `src/config.ts`), so tune them if Dhan differs.
@@ -129,7 +144,8 @@ npm run deploy
 - **Charges:** brokerage, STT at the April 2026 rates, exchange fees, GST and stamp duty are included approximately.
 - **Defined risk only:** option selling is defined-risk only. If you turn `ALLOW_NAKED_SELLING` on, Big-profile strangle cards show the loss on the largest gap of the last year.
 - **The chain check is a heuristic.** It moves the ranking a little and is never mixed into the history-based score.
-- **Personal use only.** Sharing these calls with a group would need SEBI Research Analyst registration.
+- **Personal use only.** Sharing these calls with a group would need SEBI Research Analyst registration. The hooks for later are listed in [COMMERCIAL.md](COMMERCIAL.md).
+- **Test the signals, not your picks.** To judge the signals on your own account, decide a rule in advance (for example "every ENTER scoring 70+ on the Mid board, 1 lot") and journal every trade it gives. Picking only the ones you like tests your judgement, not the signals.
 
 ## History
 

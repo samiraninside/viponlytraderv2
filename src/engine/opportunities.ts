@@ -27,6 +27,12 @@ export interface Card {
   rules: Rules; entryAt?: number;
   agents?: string[]; rank?: number; confirm?: import("./confirm").Confirmation; maxHoldMin?: number; outcome?: { result: string; r: number; at: number }; pushed?: boolean;
   avg?: AvgPlan;
+  perLot?: { capital: number; risk: number; reward: number };   // one lot, ₹ (reward = at T2, or the credit kept)
+  overCap?: boolean;           // one lot loses more than the profile's risk per trade at the stop: shown red, never pushed
+  chase?: { movedR: number; retestAt: number };   // price ran past entry: wait for a retracement
+  blocked?: string;            // ENTER held back (kill switch / data check / compliance)
+  ledgered?: number;           // ledger seq of the published CALL
+  disclosure?: string;
 }
 
 const unitsOf = (i: Inst) => (i.kind === "COMMODITY" ? i.pointValue : i.lot);
@@ -74,11 +80,19 @@ function variants(i: Inst, c: Chain | null, cand: Candidate, futPx: number, allo
   return out.filter((b): b is Built => !!b);
 }
 
-function lotsFor(p: Profile, i: Inst, e: Eval, margin: number) {
-  const byRisk = Math.floor(p.riskPerTrade / Math.max(1, e.maxLoss));
+function lotsFor(p: Profile, i: Inst, e: Eval, margin: number, ignoreRisk = false) {
+  const byRisk = ignoreRisk ? Infinity : Math.floor(p.riskPerTrade / Math.max(1, e.maxLoss));
   const byMargin = margin > 0 ? Math.floor((p.capital * p.maxMarginShare) / margin) : p.maxLots;
   const fz = FREEZE_QTY[i.root] ? Math.floor((FREEZE_QTY[i.root] - 1) / i.lot) : Infinity;
   return Math.max(0, Math.min(byRisk, byMargin, p.maxLots, fz));
+}
+
+/** One lot in rupees: capital tied up (premium paid or margin), loss at the stop, reward at T2 (or credit kept at T2). */
+function perLotMoney(s: Scored, i: Inst, L: Levels) {
+  const u = unitsOf(i), e0 = entryValue(s.b);
+  const reward = L.basis === "credit" ? (L.entry - L.t2) * u : Math.abs(L.t2 - L.entry) * u;
+  const paysPremium = e0 > 0 && !s.b.legs.some((l) => l.kind === "FUT");
+  return { capital: Math.round(paysPremium ? e0 * u : s.margin), risk: Math.round(s.e.maxLoss), reward: Math.round(Math.max(0, reward)) };
 }
 
 export interface Scored { b: Built; e: Eval; rules: Rules; S0: number; margin: number }
@@ -136,14 +150,20 @@ function levelsFor(s: Scored, cand: Candidate, i: Inst): Levels {
 export function cardsFor(i: Inst, cand: Candidate, scored: Scored[], date: string, now: number, gapMove?: number): Card[] {
   const out: Card[] = [];
   for (const p of PROFILES) {
-    let best: { s: Scored; lots: number } | null = null;
+    let best: { s: Scored; lots: number } | null = null, over: Scored | null = null;
     for (const s of scored) {
       if (!p.structures.includes(s.b.structure)) continue;
       if (cand.horizon !== "intraday" && p.overnightNeedsHedge && s.b.structure === "future") continue;
       const lots = lotsFor(p, i, s.e, s.margin);
-      if (lots < 1) continue;
+      if (lots < 1) {
+        // affordable on margin but one lot breaks the risk cap: keep the best one to show in red
+        if (lotsFor(p, i, s.e, s.margin, true) >= 1 && (!over || s.e.score > over.e.score)) over = s;
+        continue;
+      }
       if (!best || s.e.score > best.s.e.score || (s.e.score === best.s.e.score && s.e.ev * lots > best.s.e.ev * best.lots)) best = { s, lots };
     }
+    const overCap = !best && !!over;
+    if (!best && over) best = { s: over, lots: 1 };
     if (!best) continue;
     const { s, lots } = best, u = unitsOf(i);
     let gapLoss: number | undefined;
@@ -169,7 +189,9 @@ export function cardsFor(i: Inst, cand: Candidate, scored: Scored[], date: strin
       entryAt: cand.status === "ENTER" ? now : undefined, maxHoldMin: cand.maxHoldMin,
     });
     const last = out[out.length - 1];
-    last.avg = averagingPlan(last, p);
+    last.perLot = perLotMoney(s, i, last.levels);
+    if (overCap) last.overCap = true;
+    else last.avg = averagingPlan(last, p);
   }
   return out;
 }

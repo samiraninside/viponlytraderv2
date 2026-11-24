@@ -19,6 +19,7 @@
 <nav class="profiles" id="profiles"></nav>
 <nav class="filters" id="filters">
   <button data-f="all" class="on">All</button>
+  <button data-f="mine">My trades</button>
   <button data-f="intraday">Intraday</button>
   <button data-f="btst">BTST</button>
   <button data-f="positional">2–3 days</button>
@@ -31,8 +32,10 @@
   <button data-f="perf">Track record</button>
 </nav>
 <main>
+  <div id="banner"></div>
   <div id="status" class="status"></div>
-  <section id="top" class="grid"></section>
+  <section id="mine" hidden></section>
+  <section id="top" class="rows"></section>
   <h2 id="openH" hidden>Entered earlier · being tracked</h2>
   <section id="open" class="grid small"></section>
   <h2 id="doneH" hidden>Today's results</h2>
@@ -50,7 +53,7 @@
     <button>Open</button>
   </form>
 </dialog>
-<footer>Personal research tool. Not investment advice. Scores come from replaying each setup on this instrument's own history; past behaviour is not a promise. Margins and charges are approximate: check in Dhan before trading.</footer>
+<footer><span id="disclosure">Personal research tool. Not investment advice.</span> Scores come from replaying each setup on this instrument's own history; past behaviour is not a promise. Margins and charges are approximate: check in Dhan before trading.</footer>
 <script src="/app.js" type="module"></script>
 </body>
 </html>

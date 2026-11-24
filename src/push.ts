@@ -4,6 +4,7 @@
  */
 import { type IST, toMins } from "./calendar";
 import { SCHEDULE, SCORE } from "./config";
+import { getKv, putKv } from "./universe";
 import type { Card } from "./engine/opportunities";
 import type { Env } from "./env";
 
@@ -42,7 +43,7 @@ export async function sendPushes(env: Env, t: IST) {
   const sent: Record<string, number> = {};
   for (const c of all) if (c.pushed) sent[c.profile] = (sent[c.profile] ?? 0) + 1;
   // daily cap per profile (from the old engine's "10 signals a day"): best-ranked first
-  const fresh = all.filter((c) => !c.pushed && c.ev > 0)
+  const fresh = all.filter((c) => !c.pushed && c.ev > 0 && !c.overCap && !c.chase && !c.blocked)
     .sort((a, b) => (b.rank ?? b.score) - (a.rank ?? a.score))
     .filter((c) => (sent[c.profile] = (sent[c.profile] ?? 0) + 1) <= SCORE.maxPushPerDay);
   if (!fresh.length) return;
@@ -55,4 +56,19 @@ export async function sendPushes(env: Env, t: IST) {
   }
   const st = env.DB.prepare("UPDATE cards SET json=? WHERE id=?");
   await env.DB.batch(fresh.map((c) => st.bind(JSON.stringify({ ...c, pushed: true, pushedAt: Date.now() }), c.id)));
+}
+
+export interface Alert { title: string; body: string; tag: string; at?: number }
+
+/** Alerts that must reach you whatever the daily cap (exits on your own trades). Quiet hours still apply. */
+export async function pushAll(env: Env, t: IST, msgs: Alert[]) {
+  const q = (await getKv<Alert[]>(env, "alerts")) ?? [];
+  q.push(...msgs.map((m) => ({ ...m, at: Date.now() })));
+  await putKv(env, "alerts", q.slice(-20));
+  if (!env.VAPID_PRIVATE_JWK || quiet(t)) return;
+  const subs = (await env.DB.prepare("SELECT endpoint FROM subs").all<{ endpoint: string }>()).results;
+  for (const s of subs) {
+    const code = await pushOne(env, s.endpoint).catch(() => 0);
+    if (code === 404 || code === 410) await env.DB.prepare("DELETE FROM subs WHERE endpoint=?").bind(s.endpoint).run();
+  }
 }

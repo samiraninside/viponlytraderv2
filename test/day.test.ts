@@ -43,13 +43,26 @@ test("a full trading day end to end", async () => {
   const saved: any = await (await call("/api/scanners", { method: "POST", body: JSON.stringify({ name: "My 5-min trigger", text: B, dir: 1, stop: "atr:1.5", targets: [1, 2] }) }, cookie)).json();
   assert.ok(saved.ok);
   const seen = new Map<string, any>();
+  const post = async (path: string, body: unknown) => (await call(path, { method: "POST", body: JSON.stringify(body) }, cookie)).json() as any;
+  let mine: any = null;
+  const KILL_ON = 12 * 60, KILL_OFF = 12 * 60 + 30;
   for (let m = 8 * 60; m <= 23 * 60 + 45; m += 5) {
     nowS = istEpoch(DAY, m);
+    if (m === KILL_ON) assert.ok((await post("/api/kill", { on: true, reason: "test window" })).on);
+    if (m === KILL_OFF) assert.equal((await post("/api/kill", { on: false })).on, false);
     await tick(env, ist(nowS * 1000));
     if (m % 30 === 0 || (m >= 9 * 60 + 15 && m <= 10 * 60 + 30)) {
       for (const p of ["basic", "mid", "big"]) {
         const d: any = await (await call(`/api/cards?profile=${p}`, {}, cookie)).json();
         for (const c of [...d.top, ...d.open, ...d.done]) seen.set(c.id, c);
+        // journal the first directional ENTER you see on the Mid board, at the signal's own price
+        const pick = d.top.find((c: any) => c.status === "ENTER" && c.dir !== 0 && c.ledgered);
+        if (!mine && p === "mid" && pick) {
+          const r = await post("/api/journal", { cardId: pick.id, lots: 1, price: pick.levels.entry, note: "test fill" });
+          assert.ok(r.ok, JSON.stringify(r));
+          mine = r.entry;
+        }
+        if (m > KILL_ON && m < KILL_OFF) assert.ok(d.health.manual?.on, "kill switch visible on the board");
       }
     }
   }
@@ -84,7 +97,9 @@ test("a full trading day end to end", async () => {
     assert.ok(c.lots >= 1 && c.score >= 0 && c.score <= 100);
     assert.ok(c.maxLoss > 0, `${c.id} has a max loss`);
     const prof = { basic: 2000, mid: 5000, big: 10000 }[c.profile as string]!;
-    assert.ok(c.maxLoss <= prof * 1.001, `${c.id} max loss ${c.maxLoss} within the ${c.profile} risk ${prof}`);
+    if (c.overCap) assert.ok(c.lots === 1 && c.perLot.risk > prof && !c.pushed, `${c.id} is a red row: 1 lot over the cap, never pushed`);
+    else assert.ok(c.maxLoss <= prof * 1.001, `${c.id} max loss ${c.maxLoss} within the ${c.profile} risk ${prof}`);
+    assert.ok(c.perLot && c.perLot.capital > 0 && c.perLot.risk > 0, `${c.id} shows 1-lot money`);
     if (c.profile === "basic") assert.ok(["long_option", "debit_spread", "long_straddle"].includes(c.structure), `basic got ${c.structure}`);
     if (c.structure === "short_strangle") { assert.equal(c.profile, "big"); assert.ok(c.gapLoss > 0); }
     if (c.horizon !== "intraday") assert.notEqual(c.structure, "future", "no naked futures overnight");
@@ -103,4 +118,41 @@ test("a full trading day end to end", async () => {
   console.log("hedge", JSON.stringify(board.hedges.book[0]), JSON.stringify(best));
   const latest: any = await (await call("/api/push-latest", {}, cookie)).json();
   assert.ok(latest.title);
+
+  // ---------------------------------------------------------------- ledger, calibration, journal, kill switch
+  const v: any = await (await call("/api/ledger/verify", {}, cookie)).json();
+  assert.ok(v.ok && v.rows > 0, `ledger chain intact: ${JSON.stringify(v)}`);
+  const calls: any[] = await (await call("/api/ledger?kind=CALL&limit=2000", {}, cookie)).json();
+  const outs: any[] = await (await call("/api/ledger?kind=OUTCOME&limit=2000", {}, cookie)).json();
+  console.log(`ledger: ${v.rows} rows, ${calls.length} calls, ${outs.length} outcomes`);
+  assert.ok(calls.length > 0 && outs.length > 0, "calls published and outcomes recorded");
+  for (const c of calls) {
+    const hm = c.data.publishedAt.slice(11);
+    assert.ok(!(hm > "12:00" && hm < "12:30"), `no call published while the kill switch was on (${c.data.publishedAt})`);
+    assert.ok(c.data.levels && c.data.score >= 55 && c.data.pWin > 0, "call has levels, score and prediction");
+  }
+  assert.equal(new Set(calls.map((c) => c.ref)).size, calls.length, "each card published once");
+  const kills: any[] = await (await call("/api/ledger?kind=KILL", {}, cookie)).json();
+  assert.ok(kills.some((k) => k.ref === "manual" && k.data.on) && kills.some((k) => k.ref === "manual" && !k.data.on), "kill switch on/off logged");
+  const cal: any = await (await call("/api/calibration?profile=mid", {}, cookie)).json();
+  console.log("calibration", JSON.stringify({ overall: cal.overall, byScore: cal.byScore }));
+  assert.ok(cal.calls > 0 && cal.byScore.length === 4);
+
+  assert.ok(mine, "a trade was journaled");
+  const j1: any = await (await call("/api/journal", {}, cookie)).json();
+  const je = j1.entries.find((e: any) => e.id === mine.id);
+  assert.ok(je.watch && ["OK", "CAUTION", "EXIT", "STOP", "T1", "T2"].includes(je.watch.level), `exit watch ran: ${JSON.stringify(je.watch)}`);
+  assert.equal(je.summary.slippage.perUnit, 0, "filled at the signal price: no slippage");
+  const half = await post("/api/journal/fill", { id: mine.id, side: "out", lots: 1, price: +(mine.signal.entry * 1.1).toFixed(2) });
+  assert.ok(half.ok && half.entry.status === "CLOSED" && half.summary.realised > 0);
+  assert.ok((await post("/api/journal/fill", { id: mine.id, side: "out", lots: 1, price: 1 })).error, "can't exit a closed trade");
+  const j2: any = await (await call("/api/journal", {}, cookie)).json();
+  assert.equal(j2.stats.trades, 1); assert.equal(j2.stats.winPct, 100);
+  const jl: any[] = await (await call("/api/ledger?kind=JOURNAL", {}, cookie)).json();
+  assert.deepEqual(jl.map((r) => r.data.change).reverse(), ["opened", "closed"]);
+
+  // tampering is detected
+  await env.DB.prepare("UPDATE ledger SET json = replace(json, '\"score\":', '\"score\":1') WHERE seq = (SELECT MIN(seq) FROM ledger WHERE kind='CALL')").run();
+  const bad2: any = await (await call("/api/ledger/verify", {}, cookie)).json();
+  assert.equal(bad2.ok, false); assert.equal(bad2.reason, "row content was changed");
 });

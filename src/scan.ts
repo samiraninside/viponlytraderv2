@@ -4,14 +4,19 @@ import { loadScanners, makeCustomAgent } from "./custom/runner";
 import { snapshotGreeks } from "./greeks";
 import type { Agent, Candidate, Ctx } from "./agents/types";
 import { addDays, type IST, istEpoch, toMins, tradingDaysBetween, type Seg } from "./calendar";
-import { EVENTS, FILTERS, RANKING, SCORE } from "./config";
+import { CHASE, EVENTS, FILTERS, RANKING, SCORE } from "./config";
 import { confirmChain } from "./engine/confirm";
 import { type Bar, Dhan } from "./dhan";
 import { type Card, cardsFor, scoreCandidate } from "./engine/opportunities";
 import { type Chain, parseChain } from "./engine/options";
 import type { Env } from "./env";
 import { dayOf, load5m, loadDaily } from "./history";
-import { sendPushes } from "./push";
+import { chase, watch } from "./exits";
+import { assess, blockReason, record, type Segment } from "./health";
+import { type Entry, openEntries } from "./journal";
+import { append } from "./ledger";
+import { publish } from "./publish";
+import { pushAll, sendPushes } from "./push";
 import { trackCards } from "./tracker";
 import { getKv, type Inst, loadUniverse, putKv } from "./universe";
 
@@ -47,6 +52,10 @@ export async function scan(env: Env, t: IST, runs: Run[], kinds: Inst["kind"][])
   };
   const cards: Card[] = [];
   const todayBars = new Map<string, Bar[]>();
+  const lastBars: (Bar | undefined)[] = [];
+  const lastPx: Record<string, { px: number; at: string }> = (await getKv(env, "lastpx")) ?? {};
+  const journaled = (await openEntries(env)).filter((e) => insts.some((i) => i.key === e.key));
+  const watched: Entry[] = [];
   let chainCalls = 0;
   for (const i of insts) {
     try {
@@ -62,6 +71,8 @@ export async function scan(env: Env, t: IST, runs: Run[], kinds: Inst["kind"][])
       const prevClose = +(q?.ohlc?.close || 0) || [...hist.values()].at(-1)?.at(-1)?.c || daily.at(-1)?.c || 0;
       const futPx = +(q?.last_price || 0) || today.at(-1)?.c || prevClose;
       if (!futPx) continue;
+      if (runs.some((r) => r !== "preopen")) lastBars.push(today.at(-1));
+      lastPx[i.key] = { px: futPx, at: `${t.date} ${t.hhmm}` };
       const chains = new Map<number, Chain | null>();
       const getChain = async (minDays: number) => {
         if (chains.has(minDays)) return chains.get(minDays)!;
@@ -113,11 +124,28 @@ export async function scan(env: Env, t: IST, runs: Run[], kinds: Inst["kind"][])
         const c = needsChain ? await getChain(cand.minDaysToExpiry) : null;
         const scored = scoreCandidate(i, cand, c, futPx);
         const made = cardsFor(i, cand, scored, t.date, Date.now(), gapMove);
+        if (cand.dir !== 0 && cand.status === "ENTER") {
+          const ch = chase(cand.dir, cand.entry, cand.sl, futPx, CHASE.maxR, CHASE.retestR);
+          if (ch) for (const m of made) { m.chase = ch; m.trigger = `Don't chase: price is ${ch.movedR}R past entry. Wait for a retracement towards ${ch.retestAt}. ${m.trigger}`; }
+        }
         if (c && cand.dir !== 0 && cand.rules.kind === "directional") {
           const conf = confirmChain(c, cand.dir as 1 | -1, fut, await ivRank(i.root, c));
           for (const m of made) m.confirm = conf;
         }
         cards.push(...made);
+      }
+      // exit watch on the trades you journaled for this instrument
+      for (const e of journaled.filter((x) => x.key === i.key)) {
+        const opposite = cards.some((c) => c.key === i.key && c.status === "ENTER" && e.dir !== 0 && c.dir === -e.dir);
+        let verdict: number | null = null;
+        if (e.dir !== 0 && e.structure !== "future") {
+          const ch = await getChain(0).catch(() => null);
+          if (ch) verdict = confirmChain(ch, e.dir as 1 | -1, fut, null).verdict;
+        }
+        const t1Done = (e.watch?.alerted ?? []).includes("T1");
+        const w = watch({ dir: e.dir, ...e.signal.und, range: e.signal.range }, today, futPx, { oppositeEnter: opposite, chainVerdict: verdict, chainAtEntry: e.signal.confirm, t1Done });
+        e.watch = { ...w, alerted: e.watch?.alerted ?? [] };
+        watched.push(e);
       }
     } catch (e) {
       errors.push(`${i.key}: ${(e as Error).message}`);
@@ -142,7 +170,14 @@ export async function scan(env: Env, t: IST, runs: Run[], kinds: Inst["kind"][])
     if (agents.length > 1) best.why = [...best.why, `also flagged by: ${agents.filter((a) => a !== best.agent).join(", ")}`];
     kept.push(best);
   }
-  await saveCards(env, kept, t, kinds);
+  // data health → kill switch for new ENTERs
+  const segment: Segment = kinds.includes("COMMODITY") ? "MCX" : "NSE";
+  const health = assess(segment === "MCX" ? "MCX_COMM" : "NSE_FNO", t, lastBars, errors);
+  await record(env, segment, health);
+  const block = await blockReason(env, segment, health);
+  await putKv(env, "lastpx", lastPx);
+  await saveCards(env, kept, t, kinds, block, errors);
+  await exitAlerts(env, watched, t).catch((e) => errors.push(`exits: ${(e as Error).message}`));
   await trackCards(env, t, kinds, todayBars);
   await sendPushes(env, t).catch((e) => errors.push(`push: ${(e as Error).message}`));
   report.ms = Date.now() - t0;
@@ -150,7 +185,22 @@ export async function scan(env: Env, t: IST, runs: Run[], kinds: Inst["kind"][])
   return report;
 }
 
-async function saveCards(env: Env, fresh: Card[], t: IST, kinds: Inst["kind"][]) {
+/** Store each journaled trade's exit watch; push when it reaches STOP / T1 / T2 / EXIT (once each). */
+async function exitAlerts(env: Env, watched: Entry[], t: IST) {
+  const st = env.DB.prepare("UPDATE journal SET json=?, updated=? WHERE id=? AND status='OPEN'");
+  const msgs: { title: string; body: string; tag: string }[] = [];
+  for (const e of watched) {
+    const w = e.watch!;
+    if (w.level !== "OK" && w.level !== "CAUTION" && !w.alerted!.includes(w.level)) {
+      w.alerted!.push(w.level);
+      msgs.push({ title: `${w.level === "STOP" ? "STOP-LOSS" : w.level} · ${e.root} · your trade`, body: `${e.label}\n${w.reasons.join("; ")}`, tag: `exit:${e.id}:${w.level}` });
+    }
+    await st.bind(JSON.stringify(e), Date.now(), e.id).run();
+  }
+  if (msgs.length) await pushAll(env, t, msgs);
+}
+
+async function saveCards(env: Env, fresh: Card[], t: IST, kinds: Inst["kind"][], block: string | null = null, errors: string[] = []) {
   const { results } = await env.DB.prepare("SELECT id, json FROM cards WHERE date=?").bind(t.date).all<{ id: string; json: string }>();
   const old = new Map(results.map((r) => [r.id, JSON.parse(r.json) as Card]));
   const st = env.DB.prepare("INSERT OR REPLACE INTO cards(id,profile,date,status,score,json,updated) VALUES(?,?,?,?,?,?,?)");
@@ -160,7 +210,24 @@ async function saveCards(env: Env, fresh: Card[], t: IST, kinds: Inst["kind"][])
     seen.add(c.id);
     const o = old.get(c.id);
     if (o && (o.status === "TRACKING" || o.status === "DONE")) continue;   // already entered: tracker owns it
-    if (o) { c.createdAt = o.createdAt; c.pushed = o.pushed; if (o.entryAt && c.status === "ENTER") c.entryAt = o.entryAt; }
+    if (o) { c.createdAt = o.createdAt; c.pushed = o.pushed; c.ledgered = o.ledgered; if (o.entryAt && c.status === "ENTER") c.entryAt = o.entryAt; }
+    const alreadyLive = o?.status === "ENTER";
+    // kill switch: no NEW ENTER while data is unhealthy or you switched it off (published calls keep tracking)
+    if (c.status === "ENTER" && !alreadyLive && block) {
+      c.status = "WAIT"; c.blocked = block; c.entryAt = undefined; c.trigger = `Held: ${block}. ${c.trigger}`;
+    }
+    // publish: the first time a board-quality ENTER appears, it goes through the publish gate into the ledger
+    if (c.status === "ENTER" && !c.ledgered && c.score >= SCORE.minShow && c.ev > 0) {
+      const g = publish(c);
+      c.disclosure = g.disclosure;
+      if (!g.ok) { c.status = "WAIT"; c.blocked = `compliance: ${g.problems.join(", ")}`; c.entryAt = undefined; }
+      else {
+        try {
+          const [seq] = await append(env, [{ kind: "CALL", ref: c.id, data: callRecord(c, t, g.problems) }]);
+          c.ledgered = seq;
+        } catch (e) { errors.push(`ledger: ${(e as Error).message}`); }
+      }
+    }
     writes.push(st.bind(c.id, c.profile, c.date, c.status, c.score, JSON.stringify(c), Date.now()));
   }
   // cards not refreshed this run
@@ -173,6 +240,18 @@ async function saveCards(env: Env, fresh: Card[], t: IST, kinds: Inst["kind"][])
     writes.push(st.bind(o.id, o.profile, o.date, o.status, o.score, JSON.stringify(o), Date.now()));
   }
   for (let k = 0; k < writes.length; k += 50) await env.DB.batch(writes.slice(k, k + 50));
+}
+
+/** What the ledger keeps for each published call: enough to judge it later without the cards table. */
+export function callRecord(c: Card, t: IST, notes: string[] = []) {
+  return {
+    opp: c.id.slice(0, c.id.lastIndexOf(":")), cardId: c.id, profile: c.profile, publishedAt: `${t.date} ${t.hhmm}`,
+    root: c.root, key: c.key, kind: c.kind, agent: c.agent, agents: c.agents ?? [c.agent], setup: c.setup, dir: c.dir, horizon: c.horizon,
+    structure: c.structure, label: c.label, expiry: c.expiry, legs: c.legs, levels: c.levels, underlying: c.underlying, range: c.range, exitBy: c.exitBy,
+    lots: c.lots, perLot: c.perLot, maxLoss: c.maxLoss, ev: c.ev, evR: c.maxLoss ? Math.round((c.ev / c.maxLoss) * 100) / 100 : 0,
+    pWin: c.pWin, n: c.n, score: c.score, rank: c.rank, confirm: c.confirm?.verdict ?? null, trigger: c.trigger,
+    chase: c.chase ?? null, overCap: !!c.overCap, notes,
+  };
 }
 
 export const PUSH_SCORE = SCORE.pushAt;

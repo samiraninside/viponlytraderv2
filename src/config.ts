@@ -163,3 +163,39 @@ export const AVERAGING = {
     emaReclaim: "average", avwapReclaim: "average", vaSweep: "average", preBreakout: "average",
   } as Record<string, "pyramid" | "average">,
 };
+
+/** Auto-pause: switch an agent off when its live results are clearly negative (logged in the ledger; switch it back on in Scanners). */
+export const AUTOPAUSE = { enabled: true, minTrades: 20, lookbackDays: 30, pauseBelowAvgR: -0.1 };
+
+/**
+ * Data health / kill switch. While data is unhealthy, no new ENTER is shown or pushed.
+ *  staleBarMinutes: an instrument's last closed 5-min bar older than this (in market hours) counts as stale
+ *  maxStaleShare: more than this share of instruments stale → segment unhealthy
+ *  warmupMinutes: checks start this long after the session opens
+ *  scanGapMinutes: no successful scan for this long in market hours → the site shows "data stale"
+ */
+export const HEALTH = { staleBarMinutes: 15, maxStaleShare: 0.3, warmupMinutes: 20, scanGapMinutes: 12 };
+
+/** Don't chase: an ENTER card whose price already ran this many R past entry says "wait for a retracement". */
+export const CHASE = { maxR: 0.5, retestR: 0.25 };
+
+/**
+ * Exit alerts on trades you journaled. One signal = CAUTION, two or more = EXIT. Stop/target levels always alert.
+ * Signals: 5-min close on the wrong side of VWAP, of EMA20, an opposite ENTER on the same instrument,
+ * the option chain flipping to "conflicts", and OI unwinding (price against you with OI falling over `oiBars`).
+ */
+export const EXITS = { exitAt: 2, oiBars: 3 };
+
+/**
+ * Commercial switches (all OFF for personal testing). See COMMERCIAL.md before changing any of them.
+ *  mode: "personal" | "commercial"
+ *  requireCompliance: every published call must pass the compliance hook (src/publish.ts) or it is held back
+ *  disclosure: text attached to every published call and shown on the site
+ *  registration: your SEBI registration number, shown with the disclosure once you have one
+ */
+export const COMMERCIAL = {
+  mode: "personal" as "personal" | "commercial",
+  requireCompliance: false,
+  disclosure: "Personal research tool. Not investment advice.",
+  registration: null as string | null,
+};

@@ -7,6 +7,7 @@ import type { Bar } from "./dhan";
 import type { Card } from "./engine/opportunities";
 import type { Env } from "./env";
 import { dayOf, load5m, minsOf } from "./history";
+import { append } from "./ledger";
 import type { Inst } from "./universe";
 
 type Outcome = NonNullable<Card["outcome"]>;
@@ -73,6 +74,7 @@ export async function trackCards(env: Env, t: IST, kinds: Inst["kind"][], todayB
   const st = env.DB.prepare("INSERT OR REPLACE INTO cards(id,profile,date,status,score,json,updated) VALUES(?,?,?,?,?,?,?)");
   const os = env.DB.prepare("INSERT OR IGNORE INTO outcomes(id,date,agent,setup,root,horizon,structure,score,result,r) VALUES(?,?,?,?,?,?,?,?,?,?)");
   const writes: D1PreparedStatement[] = [];
+  const ledger: Parameters<typeof append>[1] = [];
   const barsCache = new Map<string, Bar[]>();
   for (const [opp, group] of byOpp) {
     const c = group[0];
@@ -90,6 +92,8 @@ export async function trackCards(env: Env, t: IST, kinds: Inst["kind"][], todayB
       writes.push(st.bind(g.id, g.profile, g.date, g.status, g.score, JSON.stringify(g), Date.now()));
     }
     writes.push(os.bind(opp, c.date, c.agent, c.setup, c.root, c.horizon, c.structure, c.score, out.result, out.r));
+    if (group.some((g) => g.ledgered)) ledger.push({ kind: "OUTCOME" as const, ref: opp, data: { opp, agent: c.agent, setup: c.setup, root: c.root, horizon: c.horizon, score: c.score, result: out.result, r: out.r, at: out.at, calls: group.filter((g) => g.ledgered).map((g) => g.ledgered) } });
   }
+  if (ledger.length) await append(env, ledger);
   for (let k = 0; k < writes.length; k += 50) await env.DB.batch(writes.slice(k, k + 50));
 }
