@@ -1,0 +1,8 @@
+# For `npm run dev` only (local). Never commit the real .dev.vars.
+DHAN_CLIENT_ID=
+DHAN_PIN=
+DHAN_TOTP_SECRET=
+APP_PASSWORD=
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_JWK=
+VAPID_SUBJECT=mailto:you@example.com

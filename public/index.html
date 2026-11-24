@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>VIPONLYTRADER Scanner</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <div class="brand">VIPONLY<span>TRADER</span></div>
+  <div class="mkt" id="mkt"></div>
+  <button id="bell" class="ghost" title="Push alerts">🔔</button>
+  <button id="refresh" class="ghost" title="Refresh">↻</button>
+</header>
+<nav class="profiles" id="profiles"></nav>
+<nav class="filters" id="filters">
+  <button data-f="all" class="on">All</button>
+  <button data-f="intraday">Intraday</button>
+  <button data-f="btst">BTST</button>
+  <button data-f="positional">2–3 days</button>
+  <button data-f="sell">Option selling</button>
+  <button data-f="watch">Watchlist</button>
+  <button data-f="hedge">Hedges</button>
+  <button data-f="greeks">Greeks</button>
+  <button data-f="scanners">Scanners</button>
+  <button data-f="settings">⚙ Settings</button>
+  <button data-f="perf">Track record</button>
+</nav>
+<main>
+  <div id="status" class="status"></div>
+  <section id="top" class="grid"></section>
+  <h2 id="openH" hidden>Entered earlier · being tracked</h2>
+  <section id="open" class="grid small"></section>
+  <h2 id="doneH" hidden>Today's results</h2>
+  <section id="done" class="list"></section>
+  <section id="perf" hidden></section>
+  <section id="hedge" hidden></section>
+  <section id="greeks" hidden></section>
+  <section id="scanners" hidden></section>
+  <section id="settings" hidden></section>
+</main>
+<dialog id="login">
+  <form method="dialog" id="loginForm">
+    <h3>Sign in</h3>
+    <input type="password" id="pw" placeholder="Password" autocomplete="current-password">
+    <button>Open</button>
+  </form>
+</dialog>
+<footer>Personal research tool. Not investment advice. Scores come from replaying each setup on this instrument's own history; past behaviour is not a promise. Margins and charges are approximate: check in Dhan before trading.</footer>
+<script src="/app.js" type="module"></script>
+</body>
+</html>

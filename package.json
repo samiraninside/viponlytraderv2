@@ -1,0 +1,22 @@
+{
+  "name": "viponly-scanner",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "tsx --test test/*.test.ts",
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute viponly-scanner --remote --file=schema.sql",
+    "vapid": "node scripts/vapid.mjs"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261119.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.165.0"
+  },
+  "private": true,
+  "type": "module"
+}

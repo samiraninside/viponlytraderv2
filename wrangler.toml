@@ -1,0 +1,23 @@
+name = "viponly-scanner"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+# Simplest start: the free workers.dev URL, protected by APP_PASSWORD (the API refuses everything without login).
+workers_dev = true
+# Later, on your own domain behind Cloudflare Access: set workers_dev = false and uncomment:
+# routes = [{ pattern = "scanner.viponlytrader.com", custom_domain = true }]
+
+[assets]
+directory = "public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "viponly-scanner"
+database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"
+
+[triggers]
+# Every 5 minutes (UTC). The worker decides what to run from the IST clock and exchange calendars.
+crons = ["*/5 * * * *"]
+
+[observability]
+enabled = true
